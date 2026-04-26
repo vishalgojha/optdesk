@@ -1,0 +1,6 @@
+fastapi==0.115.0
+uvicorn==0.32.0
+nsepython==2.97
+pytz==2026.1
+yfinance==0.2.58
+python-dotenv==1.0.0
