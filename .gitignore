@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.csv
+.env
+.env.local
+.DS_Store
+*.log
+*.tmp
+app/.next/
+node_modules/
