@@ -1,33 +1,25 @@
 #!/usr/bin/env python3
-"""Broker API routes for optdesk FastAPI"""
+"""Broker API routes for optdesk"""
 
 import sys
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Request, Query
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse, JSONResponse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-try:
-    from broker.registry import get_broker, list_brokers
-    BROKER_AVAILABLE = True
-except ImportError:
-    BROKER_AVAILABLE = False
+from broker.registry import get_broker, list_brokers
 
 broker_router = APIRouter(tags=["broker"])
 
 
 @broker_router.get("")
 def get_all_brokers():
-    if not BROKER_AVAILABLE:
-        return []
     return list_brokers()
 
 
 @broker_router.get("/{slug}/status")
 def get_broker_status(slug: str):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     try:
         broker = get_broker(slug)
     except KeyError as e:
@@ -41,8 +33,6 @@ def get_broker_status(slug: str):
 
 @broker_router.get("/{slug}/auth-url")
 def get_auth_url(slug: str):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     try:
         broker = get_broker(slug)
     except KeyError as e:
@@ -53,8 +43,6 @@ def get_auth_url(slug: str):
 
 @broker_router.get("/callback")
 def oauth_callback(request: Request):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     params = dict(request.query_params)
     slug = params.pop("broker", "")
     if not slug:
@@ -71,8 +59,6 @@ def oauth_callback(request: Request):
 
 @broker_router.post("/{slug}/connect")
 def direct_connect(slug: str):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     try:
         broker = get_broker(slug)
     except KeyError as e:
@@ -86,8 +72,6 @@ def direct_connect(slug: str):
 
 @broker_router.post("/{slug}/disconnect")
 def disconnect_broker(slug: str):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     try:
         broker = get_broker(slug)
     except KeyError as e:
@@ -98,8 +82,6 @@ def disconnect_broker(slug: str):
 
 @broker_router.get("/{slug}/positions")
 def get_positions(slug: str):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     try:
         broker = get_broker(slug)
     except KeyError as e:
@@ -110,8 +92,6 @@ def get_positions(slug: str):
 
 @broker_router.get("/{slug}/orders")
 def get_orders(slug: str):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     try:
         broker = get_broker(slug)
     except KeyError as e:
@@ -122,33 +102,9 @@ def get_orders(slug: str):
 
 @broker_router.get("/{slug}/margin")
 def get_margin(slug: str):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
     try:
         broker = get_broker(slug)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     margin = broker.get_available_margin()
     return {"broker": slug, "available_margin": margin}
-
-
-@broker_router.post("/{slug}/trade")
-def execute_trade(slug: str, signal_json: str = Query(...)):
-    if not BROKER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Broker module not available")
-    try:
-        broker = get_broker(slug)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-    try:
-        signal = json.loads(signal_json)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid signal JSON")
-
-    try:
-        from trade_executor import place_order_from_signal
-        result = place_order_from_signal(signal, slug)
-        return result
-    except Exception as e:
-        return {"success": False, "error": str(e)}

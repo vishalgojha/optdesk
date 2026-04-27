@@ -1,76 +1,95 @@
 #!/usr/bin/env python3
-"""Broker registry — manages all broker instances"""
+"""Broker registry — manages all broker connector instances"""
 
 import os
 from typing import Optional
-
-_brokers: dict = {}
-
-
-def _lazy_import(name: str) -> type:
-    """Lazy-load broker implementation to avoid hard dependencies"""
-    if name == "zerodha":
-        from .zerodha import ZerodhaBroker
-        return ZerodhaBroker
-    elif name == "angelone":
-        from .angelone import AngelOneBroker
-        return AngelOneBroker
-    raise KeyError(f"Unknown broker: {name}")
+from .base import BrokerBase
 
 
-def get_broker(slug: str, **kwargs) -> "BaseBroker":
-    """Get or create broker instance by slug"""
-    if slug not in _brokers:
-        cls = _lazy_import(slug)
-        _brokers[slug] = cls(**kwargs)
-    return _brokers[slug]
+def _load_zerodha():
+    from .zerodha import ZerodhaConnector
+    return ZerodhaConnector()
+
+
+def _load_upstox():
+    from .upstox import UpstoxConnector
+    return UpstoxConnector()
+
+
+def _load_angel():
+    from .angel import AngelConnector
+    return AngelConnector()
+
+
+def _load_fyers():
+    from .fyers_connector import FyersConnector
+    return FyersConnector()
+
+
+BROKERS: dict[str, tuple[str, callable, list[str]]] = {
+    "zerodha": (
+        "Zerodha (Kite Connect)",
+        _load_zerodha,
+        ["ZERODHA_API_KEY", "ZERODHA_API_SECRET"],
+    ),
+    "upstox": (
+        "Upstox",
+        _load_upstox,
+        ["UPSTOX_API_KEY", "UPSTOX_API_SECRET"],
+    ),
+    "angel": (
+        "Angel One (SmartAPI)",
+        _load_angel,
+        ["ANGEL_API_KEY", "ANGEL_CLIENT_ID", "ANGEL_MPIN", "ANGEL_TOTP_SECRET"],
+    ),
+    "fyers": (
+        "Fyers",
+        _load_fyers,
+        ["FYERS_CLIENT_ID", "FYERS_SECRET_KEY"],
+    ),
+}
+
+_instances: dict[str, BrokerBase] = {}
+
+
+def get_broker(slug: str) -> BrokerBase:
+    slug = slug.lower()
+    if slug not in BROKERS:
+        raise KeyError(f"Unknown broker '{slug}'. Available: {list(BROKERS)}")
+    if slug not in _instances:
+        _, loader, _ = BROKERS[slug]
+        _instances[slug] = loader()
+    return _instances[slug]
 
 
 def list_brokers() -> list[dict]:
-    """List all supported brokers with connection status"""
-    supported = ["zerodha", "angelone"]
-
     result = []
-    for slug in supported:
+    for slug, (display_name, _, required_env) in BROKERS.items():
+        configured = all(os.getenv(var) for var in required_env)
         try:
-            cls = _lazy_import(slug)
             broker = get_broker(slug)
             status = broker.status()
-            result.append({
-                "slug": slug,
-                "display_name": cls.display_name,
-                "logo": cls.logo,
-                "connected": status.connected,
-                "user_name": status.user_name,
-                "auth_type": "oauth2" if slug == "zerodha" else "direct",
-                "required_env": {
-                    "zerodha": ["ZERODHA_API_KEY", "ZERODHA_API_SECRET"],
-                    "angelone": ["ANGELONE_CLIENT_ID", "ANGELONE_PASSWORD", "ANGELONE_TOTP_SECRET"],
-                }.get(slug, []),
-            })
-        except ImportError:
-            result.append({
-                "slug": slug,
-                "display_name": slug.replace("_", " ").title(),
-                "available": False,
-                "error": "Package not installed",
-            })
-        except Exception as e:
-            result.append({
-                "slug": slug,
-                "display_name": slug.replace("_", " ").title(),
-                "available": True,
-                "error": str(e),
-            })
+            connected = status.connected
+            user = status.user_name
+        except Exception:
+            connected = False
+            user = ""
+        result.append({
+            "slug": slug,
+            "name": display_name,
+            "configured": configured,
+            "connected": connected,
+            "user": user,
+            "required_env": required_env,
+        })
     return result
 
 
 def close_all():
-    """Close all broker connections"""
-    for broker in _brokers.values():
+    for broker in _instances.values():
         try:
             if hasattr(broker, "close"):
                 broker.close()
         except Exception:
             pass
-    _brokers.clear()
+    _instances.clear()
