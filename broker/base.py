@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Broker base class and data models"""
+"""Broker base class and data models for optdesk"""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 import json
 import os
@@ -10,78 +11,74 @@ from pathlib import Path
 
 
 @dataclass
-class BrokerStatus:
-    connected: bool = False
-    user_name: Optional[str] = None
-    user_id: Optional[str] = None
-    error: Optional[str] = None
+class AuthStatus:
+    connected: bool
+    broker: str
+    user_name: str = ""
+    user_id: str = ""
+    error: str = ""
+    token_expires: Optional[datetime] = None
+
+
+@dataclass
+class OptionSymbol:
+    raw: str
+    broker_symbol: str
+    index: str
+    strike: int
+    option_type: str
+    expiry: str
+    lot_size: int = 50
+
+
+@dataclass
+class OrderResult:
+    success: bool
+    order_id: str = ""
+    broker: str = ""
+    symbol: str = ""
+    quantity: int = 0
+    side: str = ""
+    order_type: str = ""
+    price: float = 0.0
+    status: str = ""
+    message: str = ""
+    raw: dict = field(default_factory=dict)
 
 
 @dataclass
 class Position:
-    exchange: str
     symbol: str
-    product: str
+    broker_symbol: str
     quantity: int
     average_price: float
-    current_price: float
-    unrealised_pnl: float
-    realised_pnl: float
-    instrument_token: int
-
-    @property
-    def net_value(self) -> float:
-        return self.unrealised_pnl + self.realised_pnl
-
-    @property
-    def is_long(self) -> bool:
-        return self.quantity > 0
-
-    @property
-    def is_short(self) -> bool:
-        return self.quantity < 0
+    ltp: float
+    pnl: float
+    product: str
+    broker: str
 
 
 @dataclass
-class Order:
+class OrderBook:
     order_id: str
-    exchange: str
     symbol: str
-    product: str
+    side: str
     quantity: int
     price: float
-    trigger_price: float
     status: str
     order_type: str
-    side: str
-    created_at: str
-    updated_at: str
-    filled_qty: int
-    average_price: float
-
-    @property
-    def is_open(self) -> bool:
-        return self.status.upper() in ("OPEN", "TRIGGER PENDING", "AMO")
-
-    @property
-    def is_complete(self) -> bool:
-        return self.status.upper() in ("COMPLETE", "FILLED")
-
-    @property
-    def is_rejected(self) -> bool:
-        return self.status.upper() in ("REJECTED", "CANCELLED")
+    placed_at: Optional[datetime]
+    broker: str
 
 
-class BaseBroker(ABC):
-    """Abstract base class for broker integrations"""
-
-    slug: str = "unknown"
-    display_name: str = "Unknown Broker"
-    logo: str = ""
+class BrokerBase(ABC):
+    NAME: str = "unknown"
+    PACKAGE: str = ""
+    ENV_PREFIX: str = ""
 
     def __init__(self, token_store_path: str = None):
         if token_store_path is None:
-            token_store_path = str(Path(__file__).parent / f"{self.slug}_tokens.json")
+            token_store_path = str(Path(__file__).parent / f"{self.__class__.__name__.lower().replace('broker', '')}_tokens.json")
         self.token_store = Path(token_store_path)
         self._tokens: dict = self._load_tokens()
 
@@ -97,58 +94,51 @@ class BaseBroker(ABC):
         try:
             self.token_store.write_text(json.dumps(self._tokens, indent=2))
         except Exception as e:
-            print(f"⚠️  Failed to save tokens for {self.slug}: {e}")
+            print(f"⚠️  Failed to save tokens: {e}")
 
     def _get_env(self, key: str, default: str = "") -> str:
-        return os.environ.get(f"{self.slug.upper()}_{key}", default)
-
-    @abstractmethod
-    def status(self) -> BrokerStatus:
-        """Check connection status"""
-        pass
+        return os.environ.get(f"{self.ENV_PREFIX}_{key}", default)
 
     @abstractmethod
     def get_auth_url(self) -> str:
-        """Return OAuth login URL"""
         pass
 
     @abstractmethod
-    def handle_callback(self, params: dict) -> BrokerStatus:
-        """Handle OAuth callback"""
+    def handle_callback(self, params: dict) -> AuthStatus:
         pass
 
-    def authenticate(self) -> BrokerStatus:
-        """Direct auth for non-OAuth brokers"""
-        return self.status()
+    @abstractmethod
+    def status(self) -> AuthStatus:
+        pass
+
+    @abstractmethod
+    def disconnect(self) -> bool:
+        pass
+
+    @abstractmethod
+    def resolve_option_symbol(self, index: str, strike: int, option_type: str, expiry: str) -> OptionSymbol:
+        pass
+
+    @abstractmethod
+    def place_order(self, symbol: OptionSymbol, side: str, quantity: int,
+                    order_type: str = "MARKET", price: float = 0.0, product: str = "INTRADAY") -> OrderResult:
+        pass
+
+    @abstractmethod
+    def cancel_order(self, order_id: str) -> OrderResult:
+        pass
 
     @abstractmethod
     def get_positions(self) -> list[Position]:
-        """Fetch open positions"""
         pass
 
     @abstractmethod
-    def get_orders(self) -> list[Order]:
-        """Fetch today's orders"""
+    def get_orders(self) -> list[OrderBook]:
         pass
 
     @abstractmethod
     def get_available_margin(self) -> float:
-        """Available margin/buying power"""
         pass
-
-    @abstractmethod
-    def place_order(self, symbol: str, exchange: str, side: str, quantity: int,
-                    product: str, order_type: str, price: float = 0,
-                    trigger_price: float = 0) -> dict:
-        """Place an order"""
-        pass
-
-    def disconnect(self) -> bool:
-        """Clear stored tokens"""
-        self._tokens = {}
-        if self.token_store.exists():
-            self.token_store.unlink()
-        return True
 
     def is_connected(self) -> bool:
         return self.status().connected
