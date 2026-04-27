@@ -3,10 +3,10 @@
 
 import os
 from datetime import datetime
-from .base import BaseBroker, BrokerStatus, Position, Order
+from .base import BrokerBase, AuthStatus, Position, OrderBook
 
 
-class ZerodhaBroker(BaseBroker):
+class ZerodhaConnector(BrokerBase):
     slug = "zerodha"
     display_name = "Zerodha"
     logo = "zerodha.svg"
@@ -32,18 +32,18 @@ class ZerodhaBroker(BaseBroker):
         except Exception:
             return False
 
-    def status(self) -> BrokerStatus:
+    def status(self) -> AuthStatus:
         try:
             if not self._init_kite():
-                return BrokerStatus(connected=False, error="Not authenticated")
+                return AuthStatus(connected=False, error="Not authenticated")
             profile = self.kite.profile()
-            return BrokerStatus(
+            return AuthStatus(
                 connected=True,
                 user_name=profile.get("user_name"),
                 user_id=profile.get("user_id"),
             )
         except Exception as e:
-            return BrokerStatus(connected=False, error=str(e))
+            return AuthStatus(connected=False, error=str(e))
 
     def get_auth_url(self) -> str:
         from kiteconnect import KiteConnect
@@ -53,17 +53,17 @@ class ZerodhaBroker(BaseBroker):
         kite = KiteConnect(api_key=api_key)
         return kite.login_url()
 
-    def handle_callback(self, params: dict) -> BrokerStatus:
+    def handle_callback(self, params: dict) -> AuthStatus:
         request_token = params.get("request_token", "")
         if not request_token:
-            return BrokerStatus(connected=False, error="Missing request_token")
+            return AuthStatus(connected=False, error="Missing request_token")
 
         try:
             from kiteconnect import KiteConnect
             api_key = self._get_env("API_KEY")
             api_secret = self._get_env("API_SECRET")
             if not api_key or not api_secret:
-                return BrokerStatus(connected=False, error="API credentials not set")
+                return AuthStatus(connected=False, error="API credentials not set")
 
             kite = KiteConnect(api_key=api_key)
             data = kite.generate_session(request_token, api_secret)
@@ -72,9 +72,9 @@ class ZerodhaBroker(BaseBroker):
             self._save_tokens()
             self.kite = kite
             self.kite.set_access_token(data["data"]["access_token"])
-            return BrokerStatus(connected=True, user_name=data["data"]["user_name"])
+            return AuthStatus(connected=True, user_name=data["data"]["user_name"])
         except Exception as e:
-            return BrokerStatus(connected=False, error=str(e))
+            return AuthStatus(connected=False, error=str(e))
 
     def get_positions(self) -> list[Position]:
         if not self._init_kite():
@@ -83,42 +83,36 @@ class ZerodhaBroker(BaseBroker):
             data = self.kite.positions()["net"]
             return [
                 Position(
-                    exchange=r.get("exchange", ""),
                     symbol=r.get("tradingsymbol", ""),
-                    product=r.get("product", ""),
+                    broker_symbol=r.get("tradingsymbol", ""),
                     quantity=int(r.get("quantity", 0)),
                     average_price=float(r.get("average_price", 0)),
-                    current_price=float(r.get("last_price", 0)),
-                    unrealised_pnl=float(r.get("unrealised", 0)),
-                    realised_pnl=float(r.get("realised", 0)),
-                    instrument_token=int(r.get("instrument_token", 0)),
+                    ltp=float(r.get("last_price", 0)),
+                    pnl=float(r.get("unrealised", 0)),
+                    product=r.get("product", ""),
+                    broker="zerodha",
                 )
                 for r in data
             ]
         except Exception:
             return []
 
-    def get_orders(self) -> list[Order]:
+    def get_orders(self) -> list[OrderBook]:
         if not self._init_kite():
             return []
         try:
             orders = self.kite.orders()
             return [
-                Order(
+                OrderBook(
                     order_id=str(r.get("order_id", "")),
-                    exchange=r.get("exchange", ""),
                     symbol=r.get("tradingsymbol", ""),
-                    product=r.get("product", ""),
+                    side="BUY" if r.get("transaction_type", "") == "BUY" else "SELL",
                     quantity=int(r.get("quantity", 0)),
                     price=float(r.get("price", 0)),
-                    trigger_price=float(r.get("trigger_price", 0)),
                     status=r.get("status", ""),
                     order_type=r.get("order_type", ""),
-                    side="BUY" if r.get("transaction_type", "") == "BUY" else "SELL",
-                    created_at=r.get("order_timestamp", ""),
-                    updated_at=r.get("updated_at", ""),
-                    filled_qty=int(r.get("filled_quantity", 0)),
-                    average_price=float(r.get("average_price", 0)),
+                    placed_at=r.get("order_timestamp", None),
+                    broker="zerodha",
                 )
                 for r in orders
             ]

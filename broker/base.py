@@ -81,6 +81,8 @@ class BrokerBase(ABC):
             token_store_path = str(Path(__file__).parent / f"{self.__class__.__name__.lower().replace('broker', '')}_tokens.json")
         self.token_store = Path(token_store_path)
         self._tokens: dict = self._load_tokens()
+        self._last_error: str = ""
+        self._last_check: Optional[datetime] = None
 
     def _load_tokens(self) -> dict:
         if self.token_store.exists():
@@ -142,3 +144,40 @@ class BrokerBase(ABC):
 
     def is_connected(self) -> bool:
         return self.status().connected
+
+    def health_check(self) -> dict:
+        now = datetime.now()
+        self._last_check = now
+        try:
+            status = self.status()
+            self._last_error = status.error if status.error else ""
+            connected = status.connected
+            margin = self.get_available_margin() if connected else 0
+            return {
+                "broker": self.NAME,
+                "healthy": connected,
+                "connected": connected,
+                "margin": margin,
+                "last_check": now.isoformat(),
+                "error": self._last_error,
+            }
+        except Exception as e:
+            self._last_error = str(e)
+            return {
+                "broker": self.NAME,
+                "healthy": False,
+                "connected": False,
+                "margin": 0,
+                "last_check": now.isoformat(),
+                "error": str(e),
+            }
+
+    def ping(self) -> bool:
+        try:
+            return self.status().connected
+        except Exception:
+            return False
+
+    def validate_env(self, required_vars: list[str]) -> tuple[bool, list[str]]:
+        missing = [v for v in required_vars if not self._get_env(v)]
+        return len(missing) == 0, missing
