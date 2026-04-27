@@ -7,17 +7,15 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import sqlite3
 import json
 import os
+import time
 from datetime import datetime, time as dtime
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Query
+from collections import defaultdict
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import threading
-
-import threading
-import urllib.request
 import urllib.error
 from datetime import datetime, time as dtime, timedelta
 import pytz
@@ -226,6 +224,29 @@ app.add_middleware(
 DB = Path(__file__).parent / "optionchain.db"
 GEMINI_KEY = os.environ.get("GEMINI_KEY", "")
 
+BACKEND_URL = os.environ.get("NEXT_PUBLIC_BACKEND_URL", "http://127.0.0.1:8000")
+API_KEY = os.environ.get("API_KEY", "")
+RATE_LIMIT = int(os.environ.get("RATE_LIMIT", "60"))
+RATE_WINDOW = 60
+
+_rate_counts = defaultdict(list)
+_poll_counts = defaultdict(list)
+
+
+def rate_limit(client: str, limit: int = RATE_LIMIT, window: int = RATE_WINDOW) -> bool:
+    now = time.time()
+    _rate_counts[client] = [t for t in _rate_counts[client] if now - t < window]
+    _rate_counts[client].append(now)
+    return len(_rate_counts[client]) <= limit
+
+
+def check_api_key(request: Request) -> None:
+    if not API_KEY:
+        return
+    key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+    if key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 STATICS = Path(__file__).parent / "static"
 STATICS.mkdir(exist_ok=True)
 
@@ -371,6 +392,7 @@ let currentSym = 'NIFTY';
 let lastSignal = null;
 let marketInfo = null;
 let timerInterval = null;
+const BACKEND_URL = /* BACKEND_URL */'http://127.0.0.1:8000'/* */;
 
 function setStatus(info) {
   marketInfo = info;
@@ -488,14 +510,14 @@ async function fetchSignal() {
   const area = document.getElementById('signalArea');
   area.innerHTML = '<div class="loading"><div class="spinner"></div>Generating signal...</div>';
   try {
-    const r = await fetch(`/api/signal/${currentSym}`);
+    const r = await fetch(BACKEND_URL + '/api/signal/' + currentSym);
     const data = await r.json();
     if (data.error) { area.innerHTML = `<div class="empty">${data.error}</div>`; return; }
     lastSignal = data;
     area.innerHTML = parseSignal(data);
     document.getElementById('lastUpdate').textContent = `Last update: ${new Date().toLocaleString('en-IN')}`;
     // Load history
-    const hr = await fetch(`/api/history/${currentSym}`);
+    const hr = await fetch(BACKEND_URL + '/api/history/' + currentSym);
     const hist = await hr.json();
     renderHistory(hist);
   } catch(e) {
@@ -507,7 +529,7 @@ async function runPoll() {
   const area = document.getElementById('signalArea');
   area.innerHTML = '<div class="loading"><div class="spinner"></div>Fetching latest data from NSE...</div>';
   try {
-    const r = await fetch(`/api/poll?symbol=${currentSym}`,{method:'POST'});
+    const r = await fetch(BACKEND_URL + '/api/poll?symbol=' + currentSym, {method:'POST'});
     const data = await r.json();
     if (data.error) { area.innerHTML = `<div class="empty">${data.error}</div>`; return; }
     await fetchSignal();
@@ -518,7 +540,7 @@ async function runPoll() {
 
 async function checkMarket() {
   try {
-    const r = await fetch('/api/status');
+    const r = await fetch(BACKEND_URL + '/api/status');
     const d = await r.json();
     setStatus(d.market_open);
   } catch {}
@@ -573,7 +595,7 @@ async function sendChat() {
   const loading = appendMsg('Thinking...', 'bot', 'loading');
 
   try {
-    const r = await fetch('/api/chat?' + new URLSearchParams({message: msg, history: JSON.stringify(chatHistory)}));
+    const r = await fetch(BACKEND_URL + '/api/chat?' + new URLSearchParams({message: msg, history: JSON.stringify(chatHistory)}));
     const d = await r.json();
     loading.remove();
     if (d.error) {
@@ -635,7 +657,11 @@ async def root():
 
 
 @app.get("/api/status")
-async def status():
+async def status(request: Request):
+    check_api_key(request)
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limit(client_ip, limit=30):
+        return JSONResponse({"error": "Rate limit exceeded"}, status_code=429)
     info = get_market_info()
     sgx = get_sgx_nifty()
     return {
@@ -646,51 +672,41 @@ async def status():
 
 
 @app.post("/api/poll")
-async def poll(symbol: str = Query("NIFTY"), force: bool = Query(False)):
+async def poll(request: Request, symbol: str = Query("NIFTY"), force: bool = Query(False)):
+    check_api_key(request)
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limit(client_ip, limit=10, window=60):
+        return JSONResponse({"error": "Rate limit exceeded — max 10 polls/minute"}, status_code=429)
     import subprocess, sys
+    env = {**os.environ}
+    if force:
+        env["FORCE"] = "1"
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parent / "nse_poller.py"), "--symbol", symbol],
-        capture_output=True, text=True,
-        env={**os.environ, "FORCE": "1"} if force else os.environ
+        [sys.executable, str(Path(__file__).parent / "nse_poller.py"), "--symbol", symbol, "--export"],
+        capture_output=True, text=True, env=env
     )
-    return {"ok": True, "output": result.stdout[-500:]}
+    return {"ok": True, "output": result.stdout[-1000:], "stderr": result.stderr[-500:]}
 
 
 @app.get("/api/signal/{symbol}")
-async def get_signal(symbol: str = "NIFTY"):
-    csv_path = Path(__file__).parent / "option-chain.csv"
-    if not csv_path.exists():
-        return JSONResponse({"error": "No data yet. Click 'Fetch Latest Data' during market hours."}, status_code=404)
+async def get_signal(request: Request, symbol: str = "NIFTY"):
+    check_api_key(request)
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limit(client_ip, limit=30):
+        return JSONResponse({"error": "Rate limit exceeded"}, status_code=429)
 
     try:
-        rows = parse_csv(str(csv_path))
-        metrics = compute_metrics(rows)
-        sig = generate_signal(metrics)
+        sys.path.insert(0, str(Path(__file__).parent))
+        from engine.signal_engine import get_signal as engine_signal, save_signal as engine_save
+        sig = engine_signal(symbol)
+        engine_save(symbol)
 
-        ts = datetime.now().isoformat()
-        conn = sqlite3.connect(DB)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                signal TEXT,
-                confidence TEXT,
-                pcr_total REAL,
-                atm REAL,
-                max_pain REAL,
-                signal_json TEXT,
-                UNIQUE(symbol, timestamp)
-            )
-        """)
-        conn.execute("""
-            INSERT OR REPLACE INTO signals (timestamp, symbol, signal, confidence, pcr_total, atm, max_pain, signal_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (ts, symbol, sig['signal'], sig['confidence'], sig['pcr_total'], sig['atm'], sig['max_pain'], json.dumps(sig)))
-        conn.commit()
-        conn.close()
+        if sig.get("signal") == "NO_DATA":
+            return JSONResponse({"error": "No data yet. Fetch during market hours (09:15–15:30 IST)."}, status_code=404)
 
         return sig
+    except Exception as e:
+        return JSONResponse({"error": f"Error: {str(e)}"}, status_code=500)
     except Exception as e:
         return JSONResponse({"error": f"Error generating signal: {str(e)}"}, status_code=500)
 
@@ -785,4 +801,4 @@ Current option chain data:
 
 if __name__ == "__main__":
     print("🌐 Starting NSE Signal Web UI at http://localhost:8000")
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)

@@ -256,6 +256,8 @@ function ChatBox() {
   const [history, setHistory] = useState<Array<{ role: string; content: string }>>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+const DISCLAIMER = "⚠️ DISCLAIMER: Signals are for educational purposes only. NOT financial advice. Options trading involves substantial risk of loss.";
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -487,10 +489,11 @@ export default function Home() {
         </div>
       )}
 
-      <div style={{ textAlign: 'center', marginTop: 10 }}>
-        <button onClick={fetchHistory} style={{ background: 'none', border: 'none', color: '#333', fontSize: '0.75rem', cursor: 'pointer' }}>
-          History auto-updates
-        </button>
+      <div style={{
+        marginTop: 24, padding: '12px 16px', background: '#1a0a0a', border: '1px solid #ff444440',
+        borderRadius: 8, fontSize: '0.75rem', color: '#ff8888', lineHeight: 1.5,
+      }}>
+        ⚠️ {DISCLAIMER}
       </div>
 
       <ChatBox />

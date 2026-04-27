@@ -16,9 +16,76 @@ except ImportError:
     HAS_NSE = False
 
 DEFAULT_SYMBOL = "NIFTY"
+POLL_INTERVAL = 300
 
 
-def fetch_via_nsepython(symbol: str = DEFAULT_SYMBOL) -> dict | None:
+def get_sgx_nifty() -> float | None:
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEMDCP50?interval=5m&range=1d",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            quotes = data["chart"]["result"][0]["meta"]["chartingUntil"]
+            return None
+    except Exception:
+        pass
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://query2.finance.yahoo.com/v8/finance/chart/NSEMDCP50?interval=5m&range=1d",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            meta = data["chart"]["result"][0]["meta"]
+            return float(meta.get("regularMarketPrice", 0)) or None
+    except Exception:
+        return None
+
+
+def is_market_open() -> bool:
+    now = datetime.now().time()
+    return dtime(9, 15) <= now <= dtime(15, 30)
+
+
+def is_pre_market() -> bool:
+    now = datetime.now().time()
+    return dtime(9, 0) <= now <= dtime(9, 15)
+
+
+def poll_once(symbol: str = DEFAULT_SYMBOL, db: str = "optionchain.db") -> bool:
+    print(f"\n{'='*50}")
+    print(f"  Poll at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}")
+
+    sgx = get_sgx_nifty()
+    if sgx:
+        print(f"  📈 SGX Nifty: {sgx}")
+
+    if not is_market_open():
+        if is_pre_market():
+            print("  ⏳ Pre-market — polling anyway")
+        else:
+            print(f"  ⚠️  Market closed ({datetime.now().time().strftime('%H:%M')}). Sleeping.")
+            return False
+
+    data = fetch_via_nsepython(symbol)
+
+    if data:
+        save_to_sqlite(data, args.symbol, args.db)
+        records = data.get("records", {})
+        print(f"  Spot: {records.get('underlyingValue', 'N/A')}")
+        sig = save_signal_record(data, args.symbol, args.db)
+        print(f"  Signal: {sig.get('signal')} ({sig.get('confidence')})")
+        if args.export:
+            export_csv(args.db, args.symbol)
+        return True
+    else:
+        print("  ❌ Fetch failed — retrying next cycle...")
+        return False
     """Fetch using nsepython library"""
     if not HAS_NSE:
         return None
@@ -144,6 +211,72 @@ def export_csv(db: str = "optionchain.db", symbol: str = DEFAULT_SYMBOL) -> str 
     return "option-chain.csv"
 
 
+def save_signal_record(data: dict, symbol: str, db: str):
+    from nse_signal import compute_signal
+    from analytics import calculate_composite_score, detect_signal_change
+
+    records = data.get("records", {})
+    spot = records.get("underlyingValue", 0) or 0
+    expiry = records.get("expiryDates", [""])[0]
+    strike_data = records.get("data", [])
+
+    by_strike = {}
+    for row in strike_data:
+        strike = row.get("strikePrice", 0)
+        if not strike:
+            continue
+        by_strike[strike] = {
+            "ce_oi": row.get("CE", {}).get("openInterest", 0),
+            "pe_oi": row.get("PE", {}).get("openInterest", 0),
+            "ce_chng_oi": row.get("CE", {}).get("changeinOpenInterest", 0),
+            "pe_chng_oi": row.get("PE", {}).get("changeinOpenInterest", 0),
+            "ce_iv": row.get("CE", {}).get("impliedVolatility", 0),
+            "pe_iv": row.get("PE", {}).get("impliedVolatility", 0),
+            "ce_ltp": row.get("CE", {}).get("lastPrice", 0),
+            "pe_ltp": row.get("PE", {}).get("lastPrice", 0),
+        }
+
+    pcr_total = sum(r["pe_oi"] for r in by_strike.values()) / max(1, sum(r["ce_oi"] for r in by_strike.values()))
+    atm_strike = min(by_strike.keys(), key=lambda s: abs(s - spot)) if by_strike else 0
+
+    ts = datetime.now().isoformat()
+    conn = sqlite3.connect(db)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL, symbol TEXT NOT NULL,
+            signal TEXT, confidence TEXT,
+            pcr_total REAL, atm REAL, max_pain REAL,
+            score REAL, sentiment TEXT,
+            signal_json TEXT,
+            UNIQUE(symbol, timestamp)
+        )
+    """)
+
+    signal_data = compute_signal(by_strike, spot, atm_strike, pcr_total)
+    sig_json = json.dumps(signal_data)
+    score_data = calculate_composite_score(symbol)
+    change = detect_signal_change(symbol)
+
+    conn.execute("""
+        INSERT OR REPLACE INTO signals
+        (timestamp, symbol, signal, confidence, pcr_total, atm, max_pain, score, sentiment, signal_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (ts, symbol, signal_data.get("signal"), signal_data.get("confidence"),
+          pcr_total, atm_strike, signal_data.get("max_pain"),
+          score_data.get("score"), score_data.get("sentiment"), sig_json))
+
+    conn.commit()
+    conn.close()
+
+    if change and change.get("alert"):
+        from notifications import notify_signal
+        print("  🔔 Signal changed! Sending notifications...")
+        notify_signal(signal_data)
+
+    return signal_data
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -151,52 +284,31 @@ if __name__ == "__main__":
     parser.add_argument("--db", default="optionchain.db")
     parser.add_argument("--export", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--no-force", dest="force", action="store_false")
+    parser.add_argument("--daemon", action="store_true")
+    parser.add_argument("--interval", type=int, default=POLL_INTERVAL)
     args = parser.parse_args()
 
-    print(f"\n{'='*50}")
-    print(f"  NSE Poller | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*50}")
-
-    now = datetime.now().time()
-    if not args.force and not (dtime(9, 15) <= now <= dtime(15, 30)):
-        print(f"⚠️  Market closed ({now.strftime('%H:%M')}). Skipping.")
-        if not args.export:
-            sys.exit(0)
-
-    data = fetch_via_nsepython(args.symbol)
-
-    if data:
-        save_to_sqlite(data, args.symbol, args.db)
-
-        records = data.get("records", {})
-        print(f"\n  Spot: {records.get('underlyingValue', 'N/A')}")
-        print(f"  Expiries: {records.get('expiryDates', [])[:3]}")
-
-        # Save signal record
-        ts = datetime.now().isoformat()
-        conn2 = sqlite3.connect(args.db)
-        conn2.execute("""
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                signal TEXT,
-                confidence TEXT,
-                pcr_total REAL,
-                atm REAL,
-                max_pain REAL,
-                signal_json TEXT,
-                UNIQUE(symbol, timestamp)
-            )
-        """)
-        conn2.execute("""
-            INSERT OR IGNORE INTO signals (timestamp, symbol)
-            VALUES (?, ?)
-        """, (ts, args.symbol))
-        conn2.close()
-
-        if args.export:
-            export_csv(args.db, args.symbol)
+    if args.daemon:
+        print(f"\n🔄 Auto-scheduler mode — polling every {args.interval}s during market hours")
+        print("   Ctrl+C to stop\n")
+        while True:
+            if is_market_open():
+                success = poll_once(args.symbol, args.db)
+                if not success:
+                    time.sleep(args.interval)
+                else:
+                    time.sleep(args.interval)
+            elif is_pre_market():
+                print(f"  ⏳ Pre-market — polling every {args.interval}s")
+                time.sleep(args.interval // 4)
+            else:
+                sleep_until = 9 * 60 + 15
+                now_mins = datetime.now().hour * 60 + datetime.now().minute
+                if now_mins >= 15 * 60:
+                    sleep_until = (24 + 9) * 60 + 15
+                sleep_mins = sleep_until - now_mins
+                print(f"  💤 Market closed — sleeping {sleep_mins}min until 09:15")
+                time.sleep(min(sleep_mins * 60, args.interval * 4))
     else:
-        print("❌ Fetch failed")
-        sys.exit(1)
+        poll_once(args.symbol, args.db)
