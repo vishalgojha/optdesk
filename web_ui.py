@@ -812,6 +812,13 @@ Current option chain data:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+try:
+    from broker_routes import broker_router
+    app.include_router(broker_router, prefix="/api/broker")
+except ImportError:
+    pass
+
+
 if __name__ == "__main__":
     print("🌐 Starting NSE Signal Web UI at http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)

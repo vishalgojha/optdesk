@@ -4,3 +4,6 @@ nsepython==2.97
 pytz==2026.1
 yfinance==0.2.58
 python-dotenv==1.0.0
+kiteconnect>=4.0.0
+smartapi-python>=1.2.0
+pyotp>=2.9.0
