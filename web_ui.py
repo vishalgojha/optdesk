@@ -712,12 +712,20 @@ async def get_signal(request: Request, symbol: str = "NIFTY"):
 
 
 @app.get("/api/history/{symbol}")
-async def history(symbol: str = "NIFTY"):
+async def history(request: Request, symbol: str = "NIFTY"):
+    check_api_key(request)
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limit(client_ip, limit=30):
+        return JSONResponse({"error": "Rate limit exceeded"}, status_code=429)
     return get_history(symbol)
 
 
 @app.get("/api/snapshots/{symbol}")
-async def snapshots(symbol: str = "NIFTY"):
+async def snapshots(request: Request, symbol: str = "NIFTY"):
+    check_api_key(request)
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limit(client_ip, limit=20):
+        return JSONResponse({"error": "Rate limit exceeded"}, status_code=429)
     if not Path(DB).exists():
         return []
     conn = sqlite3.connect(DB)
@@ -744,10 +752,15 @@ async def snapshots(symbol: str = "NIFTY"):
 
 
 @app.post("/api/chat")
-async def chat(message: str = Query(...), history: str = Query("[]")):
+async def chat(request: Request, message: str = Query(...), history: str = Query("[]")):
     """Chat with Gemini about the NSE option chain data"""
+    check_api_key(request)
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limit(client_ip, limit=10, window=60):
+        return JSONResponse({"error": "Rate limit exceeded — max 10 chats/minute"}, status_code=429)
+
     if not GEMINI_KEY:
-        return JSONResponse({"error": "GEMINI_KEY not configured. Add it to .env or set the environment variable."}, status_code=500)
+        return JSONResponse({"error": "GEMINI_KEY not configured."}, status_code=500)
 
     import csv as csvmod
 

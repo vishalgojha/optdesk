@@ -168,12 +168,11 @@ def get_signal(symbol: str = "NIFTY") -> dict:
     else:
         day_left = "unknown"
 
+    time_decay = "LOW"
     if hour >= 14:
-        time_decade = "HIGH — theta decay accelerates, avoid new positions"
+        time_decay = "HIGH — theta decay accelerates, avoid new positions"
     elif hour >= 12:
-        time_decade = "MEDIUM — manage existing positions"
-    else:
-        time_decay = "LOW — full theta benefit"
+        time_decay = "MEDIUM — manage existing positions"
 
     # ── Invalidation ────────────────────────────────────────────────────
     if signal.startswith("SETUP LONG") or signal == "BREAKOUT LONG":
@@ -229,7 +228,7 @@ def get_signal(symbol: str = "NIFTY") -> dict:
             "pe_buildup": metrics.get("pe_buildup", 0),
             "iv_skew": metrics.get("iv_skew", 0),
             "vix_filter": vix_filter,
-            "time_decay": time_decade if "time_decade" in dir() else "LOW",
+            "time_decay": time_decay,
             "near_strike_count": metrics.get("near_strike_count", 0),
         },
         "timestamp": data.get("timestamp", datetime.now().isoformat()),

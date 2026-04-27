@@ -103,10 +103,10 @@ def compute_bias(metrics: dict, prev: Optional[dict] = None) -> dict:
 
     # Layer 1: PCR + OI change momentum
     raw = 0.5
-    if pcr > 1.3: raw += 0.2
-    elif pcr > 1.5: raw += 0.3
-    elif pcr < 0.8: raw -= 0.2
+    if pcr > 1.5: raw += 0.3
+    elif pcr > 1.3: raw += 0.2
     elif pcr < 0.6: raw -= 0.3
+    elif pcr < 0.8: raw -= 0.2
 
     # OI shift momentum
     net_oi_shift = (pe_buildup - pe_unwind) - (ce_buildup - ce_unwind)
